@@ -152,31 +152,3 @@ const updateGameState = () => {
     }
   })
 }
-
-// io.on("connection", function (socket) {
-//   console.log("Made socket connection");
-
-//   socket.on("disconnect", () => {
-//     const usr = socket.userId;
-//     activeUsers = activeUsers.map(activeUsers => (activeUsers.user === usr ? { ...activeUsers, takenPlace: false, user: undefined, cards: [], isReady: false } : activeUsers));
-
-//     io.emit("places", activeUsers);
-//   });
-
-//   socket.on("places", () => {
-//     io.emit("places", activeUsers);
-//   });
-
-//   socket.on("readyStatus", (player) => {
-//     const usr = player.user;
-//     activeUsers = activeUsers.map(activeUsers => (activeUsers.user === usr ? { ...activeUsers, isReady: player.status } : activeUsers));
-
-//     io.emit("places", activeUsers);
-//   });
-
-//   socket.on("startGame", () => {
-//     selectedCards = [];
-//     activeUsers = activeUsers.map((activeUsers) => ({ ...activeUsers, cards: setCards() }));
-//     io.emit("places", activeUsers);
-//   });
-// });
