@@ -1,28 +1,15 @@
-const express = require("express");
-const socket = require("socket.io");
-
-// App setup
-const PORT = 5000;
+const uuid = require('uuid');
+const express = require('express');
 const app = express();
+const server = require('http').createServer(app);
+const WebSocket = require('ws');// const socket = require("socket.io");
 
-const server = app.listen(PORT, function () {
-  console.log(`Listening on port ${PORT}`);
-  console.log(`http://localhost:${PORT}`);
-});
+// // App setup
+const PORT = 5000;
+const clients = {};
+const wss = new WebSocket.Server({ server: server });
 
-// Static files
-app.use(express.json());
-
-// Socket setup
-const io = socket(server, { upgrade: false });
-
-let activeUsers = [
-  { place: 'N', takenPlace: false, user: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'S', takenPlace: false, user: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'E', takenPlace: false, user: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'W', takenPlace: false, user: undefined, cards: [], cardsAmount: 0, isReady: false },
-];
-
+let selectedCards = [];
 let cards = [
   '2C', '2D', '2H', '2S', '3C', '3D', '3H', '3S',
   '4C', '4D', '4H', '4S', '5C', '5D', '5H', '5S',
@@ -33,23 +20,20 @@ let cards = [
   'AC', 'AD', 'AH', 'AS'
 ];
 
+const initialUser = { place: undefined, takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false };
+
+let activeUsers = [
+  { place: 'N', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
+  { place: 'S', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
+  { place: 'E', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
+  { place: 'W', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
+];
+
 const getRandomInt = (min, max) => {
   min = Math.ceil(min);
   max = Math.floor(max);
   
   return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-const checkIfCardAlreadyExists = (card) => {
-  let cardAlreadyExists = false;
-
-  for (let user of activeUsers) {
-    if (user.cards.includes(card)) {
-      cardAlreadyExists = true;
-    }
-  }
-
-  return cardAlreadyExists;
 }
 
 const setCards = () => {
@@ -58,10 +42,10 @@ const setCards = () => {
 
   while (cardsCount < 13) {
     const cardIndexNumber = getRandomInt(0, cards.length - 1);
-    const cardAlreadyExists = checkIfCardAlreadyExists(cards[cardIndexNumber]);
 
-    if (!cardAlreadyExists && !playerCards.includes(cards[cardIndexNumber])) {
+    if (!selectedCards.includes(cards[cardIndexNumber]) && !playerCards.includes(cards[cardIndexNumber])) {
       playerCards.push(cards[cardIndexNumber]);
+      selectedCards.push(cards[cardIndexNumber]);
       cardsCount += 1;
     }
   }
@@ -69,42 +53,130 @@ const setCards = () => {
   return playerCards;
 }
 
-io.on("connection", function (socket) {
-  console.log("Made socket connection");
+wss.on('connection', function connection(ws, request, client) {
+  //generate a new clientId
+  const clientId = uuid.v4();
+  clients[clientId] = {
+      "connection":  ws,
+  }
 
-  socket.on("disconnect", () => {
-    const usr = socket.userId;
-    activeUsers = activeUsers.map(activeUsers => (activeUsers.user === usr ? { ...activeUsers, takenPlace: false, user: undefined, cards: [] } : activeUsers));
+  const payLoad = {
+      method: "connect",
+      clientId: clientId,
+      users: activeUsers,
+  }
 
-    io.emit("places", activeUsers);
-  });
+  //send back the client connect
+  ws.send(JSON.stringify(payLoad))
 
-  socket.on("places", (user) => {
-    io.emit("places", activeUsers);
-  });
+  ws.on("message", (message) => {
+    const result = JSON.parse(message);
 
-  socket.on("clean place", (userName) => {
-    activeUsers = activeUsers.map(activeUsers => (activeUsers.user === userName ? { ...activeUsers, takenPlace: false, user: undefined, cards: [] } : activeUsers));
+    if (result.method === 'join') {
+      const clientId = result.clientId;
+      const place = result.place;
+      const userName = result.userName;
+      const userAlreadyExists = activeUsers.filter(activeUsers => activeUsers.name === userName);
 
-    io.emit("places", activeUsers);
-  });
-
-  socket.on("set place", (data) => {
-    const userAlreadyExists = activeUsers.filter(activeUsers => activeUsers.user === data.user);
-    socket.userId = data.user;
-
-    activeUsers = activeUsers.map(user => {
-      if (user.place === data.place && !userAlreadyExists.length && !user.takenPlace) {
-        return {
-          cards: [],
-          place: user.place,
-          takenPlace: true,
-          user: data.user,
+      activeUsers = activeUsers.map(user => {
+        if (user.place === place && !userAlreadyExists.length && !user.takenPlace) {
+          const cardsList = setCards();
+          return {
+            ...user,
+            cards: cardsList,
+            name: userName,
+            takenPlace: true,
+            uuid: clientId,
+            cardsAmount: cardsList.length,
+          }
         }
-      }
-      return { ...user };
-    });
+        return { ...user, cards: [] };
+      });
 
-    io.emit("places", activeUsers);
-  });
+      const setCardsPayload = {
+        method: 'join',
+        clientId,
+        users: activeUsers,
+      }
+
+      const con = clients[clientId].connection;
+      con.send(JSON.stringify(setCardsPayload));
+      updateGameState();
+    }
+
+    if (result.method === 'ready') {
+      const clientId = result.clientId;
+      const userName = result.userName;
+
+      activeUsers = activeUsers.map((user) => user.name === userName ? { ...user, isReady: !user.isReady } : user);
+
+      const payload = {
+        method: 'ready',
+        clientId,
+        users: activeUsers,
+      }
+
+      const con = clients[clientId].connection;
+      con.send(JSON.stringify(payload));
+
+      updateGameState();
+    }
+
+    if (result.method === 'clean') {
+      const clientId = result.clientId;
+      const userName = result.userName;
+
+      activeUsers = activeUsers.map((user) => user.name === userName ? { ...initialUser, place: user.place } : user);
+
+      const cleanPayload = {
+        method: 'clean',
+        clientId,
+        users: activeUsers,
+      }
+
+      const con = clients[clientId].connection;
+      con.send(JSON.stringify(cleanPayload));
+    }
+  })
 });
+
+app.get('/', (req, res) => res.send('SIEMA'))
+
+server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));
+
+const updateGameState = () => {
+  activeUsers = activeUsers.map(user => ({ ...user, cards: [] }));
+  activeUsers.forEach(usr => {
+    if (usr.uuid) {
+      clients[usr.uuid].connection.send(JSON.stringify({ method: 'updatePlaces', users: activeUsers }));
+    }
+  })
+}
+
+// io.on("connection", function (socket) {
+//   console.log("Made socket connection");
+
+//   socket.on("disconnect", () => {
+//     const usr = socket.userId;
+//     activeUsers = activeUsers.map(activeUsers => (activeUsers.user === usr ? { ...activeUsers, takenPlace: false, user: undefined, cards: [], isReady: false } : activeUsers));
+
+//     io.emit("places", activeUsers);
+//   });
+
+//   socket.on("places", () => {
+//     io.emit("places", activeUsers);
+//   });
+
+//   socket.on("readyStatus", (player) => {
+//     const usr = player.user;
+//     activeUsers = activeUsers.map(activeUsers => (activeUsers.user === usr ? { ...activeUsers, isReady: player.status } : activeUsers));
+
+//     io.emit("places", activeUsers);
+//   });
+
+//   socket.on("startGame", () => {
+//     selectedCards = [];
+//     activeUsers = activeUsers.map((activeUsers) => ({ ...activeUsers, cards: setCards() }));
+//     io.emit("places", activeUsers);
+//   });
+// });
