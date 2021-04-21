@@ -26,6 +26,10 @@ const cardColorWeight = {
   C: 0.25,
 };
 
+export const resetSelectedCards = () => {
+  selectedCards = [];
+};
+
 export const sortCards = (cards) => {
   let changes = 0;
   const sortedCards = [...cards];
@@ -46,16 +50,16 @@ export const sortCards = (cards) => {
   return sortedCards;
 };
 
-export const setCards = () => {
+export const setCards = (game: any) => {
   const playerCards = [];
   let cardsCount = 0;
 
   while (cardsCount < 13) {
     const cardIndexNumber = getRandomInt(0, cards.length - 1);
 
-    if (!selectedCards.includes(cards[cardIndexNumber]) && !playerCards.includes(cards[cardIndexNumber])) {
+    if (!game.selectedCards.includes(cards[cardIndexNumber]) && !playerCards.includes(cards[cardIndexNumber])) {
       playerCards.push(cards[cardIndexNumber]);
-      selectedCards.push(cards[cardIndexNumber]);
+      game.selectedCards.push(cards[cardIndexNumber]);
       cardsCount += 1;
     }
   }

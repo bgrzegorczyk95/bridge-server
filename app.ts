@@ -1,6 +1,7 @@
 import { response } from 'express';
+import { cardWeights, dummyPlace, openedPlaceType, pointsValues, turnPlaces } from './utils/dict';
 import { getRandomInt } from './utils/randomInt';
-import { setCards } from './utils/setCards';
+import { setCards, resetSelectedCards } from './utils/setCards';
 
 const uuid = require('uuid');
 const express = require('express');
@@ -23,228 +24,293 @@ const PORT = 5000;
 const clients = {};
 const wss = new WebSocket.Server({ server: server });
 
-let turn = { name: undefined, place: undefined };
-let points = [];
-let passCount = 0;
-let bestBid = { userName: undefined, colorName: undefined, value: undefined, place: undefined };
-let auctionHistory = [];
-let thrownCards = [];
+const initialBestBid = { userName: undefined, colorName: undefined, value: undefined, place: undefined, doubled: false, redoubled: false };
+const initialGamePoints = { NS: { under: [0], above: 0, round: 0, games: 0 }, EW: { under: [0], above: 0, round: 0, games: 0 }, afterPart: [], games: 0 };
 
-const turnPlaces = {
-  N: 'E',
-  W: 'N',
-  S: 'W',
-  E: 'S',
-};
-
-const initialUser = { place: undefined, takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false };
-
-let activeUsers: Player[] = [
+const players: Player[] = [
   { place: 'N', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
   { place: 'S', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
   { place: 'E', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
   { place: 'W', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
 ];
 
-const dummyPlace = {
-  N: 'S',
-  S: 'N',
-  E: 'W',
-  W: 'E',
+const game = {
+  gameId: undefined,
+  clientId: undefined,
+  name: undefined,
+  passCount: 0,
+  playersCount: 0,
+  throws: [],
+  thrownCards: [],
+  selectedCards: [],
+  biddingHistory: [],
+  turn: { name: undefined, place: undefined },
+  bestBid: { ...initialBestBid },
+  players: [...players],
+  gamePoints: { ...initialGamePoints },
+  statuses: {
+    gameStarted: false,
+    auctionStarted: false,
+    showCountDown: false,
+  }
 };
 
-const openedPlaceType = {
-  N: 'E',
-  E: 'S',
-  S: 'W',
-  W: 'N',
-};
+const games = [game, game, game, game, game, game, game, game, game, game].map((game, i) => ({ ...game, gameId: i }));
 
-export const cardWeights = {
-  '2': 1,
-  '3': 2,
-  '4': 3,
-  '5': 4,
-  '6': 5,
-  '7': 6,
-  '8': 7,
-  '9': 8,
-  '10': 9,
-  'J': 10,
-  'Q': 11,
-  'K': 12,
-  'A': 13,
-}
-
-const setTurnPlace = (turn: string) => {
-  const player = activeUsers.filter((place: Player) => place.place === turn);
+const setTurnPlace = (turn: string, gameId: number) => {
+  const player = games[gameId].players.filter((player: Player) => player.place === turn);
   return player[0].name;
 };
 
+const checkIfPlayerAlreadyInGame = (gameId: number, clientId: string) => {
+  const filteredPlayers = games[gameId].players.filter(player => player.uuid === clientId);
+  return filteredPlayers.length;
+};
+
+const choosePlace = (gameId: number, clientId: string, place: string, userName: string) => {
+  const userAlreadyExists = checkIfPlayerAlreadyInGame(gameId, clientId);
+
+  games[gameId].players = games[gameId].players.map(player => {
+    if (player.place === place && !userAlreadyExists && !player.takenPlace) {
+      return {
+        ...player,
+        name: userName,
+        takenPlace: true,
+        uuid: clientId,
+      }
+    }
+    return player;
+  });
+};
+
+const setPlayerReady = (gameId: number, clientId: string) => {
+  games[gameId].players = games[gameId].players.map((player) => {
+    if (player.uuid === clientId) {
+      return { ...player, isReady: !player.isReady };
+    }
+    return player;
+  });
+};
+
+const setInitialCards = (game: any) => {
+  game.statuses.auctionStarted = true;
+  game.players = game.players.map((player: any) => {
+    const cards = setCards(game);
+    return ({ ...player, cards, cardsAmount: 13 })
+  });
+}
+
+const setInitialTurn = (game: any, gameId: number) => {
+  const player = game.players[getRandomInt(0, 3)];
+  game.turn = setTurn(player.place, gameId);
+
+  setInitialCards(game)
+
+  const payload = {
+    method: 'startBidding',
+    turn: game.turn,
+    statuses: game.statuses,
+  };
+
+  updateGameState(gameId);
+  sendPayload(payload, gameId);
+};
+
+const checkIfTurnEmpty = (gameId: number) => {
+  const game = games[gameId];
+
+  if (!game.turn.name) {
+    setInitialTurn(game, gameId);
+  }
+};
+
+const updateBidValues = (game: any, bid: any) => {
+  game.passCount = setPassCount(bid, game.passCount);
+  game.bestBid = setBestBid(bid, game);
+  game.biddingHistory = [...game.biddingHistory, bid];
+};
+
+const checkIfBiddingFinished = (game: any, gameId: number) => {
+  let isBiddingFinished = false;
+
+  if (game.biddingHistory.length >= 4 && game.passCount === 3) {
+    game.turn = setTurn(openedPlaceType[game.bestBid.place], gameId);
+    game.statuses.auctionStarted = false;
+    game.statuses.gameStarted = true;
+    isBiddingFinished = true;
+  }
+
+  return isBiddingFinished;
+}
+
+const updateBid = (gameId: number, bid: any, turn: any) => {
+  const newTurn = setTurn(turnPlaces[turn.place], gameId);
+  const game = games[gameId];
+
+  updateBidValues(game, bid);
+
+  if (game.biddingHistory.length === 4 && game.passCount === 4) {
+    setNewDeal(newTurn, gameId);
+    return;
+  }
+
+  const isBiddingFinished = checkIfBiddingFinished(game, gameId);
+
+  const payload = {
+    method: 'bid',
+    bid,
+    turn: newTurn,
+    bestBid: game.bestBid,
+    biddingHistory: game.biddingHistory,
+    statuses: game.statuses,
+    isBiddingFinished,
+  };
+
+  sendPayload(payload, gameId);
+};
+
+const updateGamePoints = (game, bestThrow) => {
+  if (bestThrow.place === 'N' || bestThrow.place === 'S') {
+    game.gamePoints.NS.round += 1; 
+  } else {
+    game.gamePoints.EW.round += 1;
+  }
+
+  game.throws = [...game.throws, bestThrow];
+  game.thrownCards = [];
+}
+
+const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
+  game.thrownCards = [...game.thrownCards, card];
+  const updatedCards = game.players.map((player: Player) => player.place === turn.place ? {
+    ...player,
+    cardsAmount: player.cardsAmount - 1,
+    cards: filterCards(player.cards, card),
+  } : player);
+
+  game.players = updatedCards;
+}
+
 wss.on('connection', function connection(ws, request, client) {
   //generate a new clientId
-  const clientId = uuid.v4();
-  clients[clientId] = {
-      connection:  ws,
-  };
-
-  const payLoad = {
-      method: "connect",
-      clientId: clientId,
-      users: preparePlayersToSend(),
-  };
-
-  //send back the client connect
-  ws.send(JSON.stringify(payLoad))
+  let clientId = uuid.v4();
+  let gameId;
 
   ws.on("message", (message) => {
     const result = JSON.parse(message);
 
+    if (result.method === 'connect') {
+      // let users = preparePlayersToSend();
+      clients[clientId] = {
+        connection: ws,
+      };
+      // if (!result.clientId) {
+      //   clients[clientId] = {
+      //     connection: ws,
+      //   };
+      // } else {
+      //   clientId = result.clientId;
+      //   users = preparePlayersToSend(clientId);
+      // }
+
+      const payLoad = {
+          method: "connect",
+          clientId: clientId,
+          games,
+      };
+
+      //send back the client connect
+      ws.send(JSON.stringify(payLoad));
+    }
+
+    if (result.method === 'selectTable') {
+      gameId = result.gameId;
+      console.log(gameId);
+    }
+
     if (result.method === 'join') {
-      const { clientId, place, userName } = result;
-      const userAlreadyExists = activeUsers.filter(activeUser => activeUser.uuid === clientId);
+      const { clientId, gameId, place, userName } = result;
 
-      activeUsers = activeUsers.map(user => {
-        if (user.place === place && !userAlreadyExists.length && !user.takenPlace) {
-          const cardsList = setCards();
-          return {
-            ...user,
-            cards: cardsList,
-            name: userName,
-            takenPlace: true,
-            uuid: clientId,
-            cardsAmount: cardsList.length,
-          }
-        }
-        return user;
-      });
-
-      updateGameState();
+      choosePlace(gameId, clientId, place, userName);
+      updateGameState(gameId);
     }
 
     if (result.method === 'ready') {
-      const { clientId } = result;
-
-      activeUsers = activeUsers.map((user) => user.uuid === clientId ? { ...user, isReady: !user.isReady } : user);
-      updateGameState();
+      const { clientId, gameId } = result;
+      setPlayerReady(gameId, clientId);
+      updateGameState(gameId);
     }
 
-    if (result.method === 'turn') {
-      if (!turn.name) {
-        const player = activeUsers[getRandomInt(0, 3)];
-        turn = setTurn(player.place);
-        setPlayerTurn(turn);
-      }
+    if (result.method === 'startBidding') {
+      const { gameId } = result;
+
+      checkIfTurnEmpty(gameId);
     }
 
     if (result.method === 'bid') {
-      let isAuctionFinished = false;
-      let turn = setTurn(turnPlaces[result.turn.place]);
+      const { gameId, bid, turn } = result;
 
-      passCount = setPassCount(result.bid, passCount);
-      bestBid = setBestBid(result.bid, bestBid);
-      auctionHistory = [...auctionHistory, result.bid];
-
-      if ((auctionHistory.length === 4 && passCount === 4) || (auctionHistory.length >= 4 && passCount === 3)) {
-        turn = setTurn(openedPlaceType[bestBid.place]);
-        isAuctionFinished = true;
-      }
-
-      const payload = {
-        method: 'bid',
-        turn,
-        bid: result.bid,
-        trump: bestBid,
-        history: auctionHistory,
-        isAuctionFinished,
-      };
-
-      activeUsers.forEach(usr => {
-        if (usr.uuid) {
-          clients[usr.uuid].connection.send(JSON.stringify(payload));
-        }
-      })
-    };
-
-    if (result.method === 'setDummy') {
-      const payload = {
-        method: 'setDummy',
-        dummy: result.dummy,
-      };
-
-      activeUsers.forEach(usr => {
-        if (usr.uuid) {
-          clients[usr.uuid].connection.send(JSON.stringify(payload));
-        }
-      });
-    };
-
-    if (result.method === 'setPlayer') {
-      const payload = {
-        method: 'setPlayer',
-        player: result.player,
-      };
-
-      activeUsers.forEach(usr => {
-        if (usr.uuid && usr.place === dummyPlace[result.player.place]) {
-          clients[usr.uuid].connection.send(JSON.stringify(payload));
-        }
-      });
+      updateBid(gameId, bid, turn);
     };
 
     if (result.method === 'throw') {
-      const turn = setTurn(turnPlaces[result.turn.place]);
-      const { card } = result;
+      const { card, gameId, turn } = result;
+      const game = games[gameId];
+      const newTurn = setTurn(turnPlaces[turn.place], gameId);
 
-      thrownCards = [...thrownCards, card];
-
-      activeUsers = activeUsers.map((user: Player) => user.place === card.place ? {
-        ...user,
-        cardsAmount: user.cardsAmount - 1,
-        cards: filterCards(user.cards, card),
-      } : user);
+      updatePlayerCardsAmount(game, card, turn);
 
       const payload = {
         method: 'throw',
-        turn,
-        thrownCards,
-        users: activeUsers,
+        turn: newTurn,
+        thrownCards: game.thrownCards,
       };
 
-      updateThrow(payload);
+      updateThrow(payload, gameId);
     };
 
-    if (result.method === 'bestThrow' && thrownCards.length === 4) {
-      let bestThrow = setBestThrow(thrownCards);
-      points = [...points, bestThrow];
-      thrownCards = [];
+    if (result.method === 'bestThrow' && games[result.gameId].thrownCards.length === 4) {
+      const game = games[result.gameId];
+      let bestThrow = setBestThrow(game);
+      const turn = setTurn(bestThrow.place, result.gameId);
+
+      updateGamePoints(game, bestThrow);
+
+      if (game.throws.length === 13) {
+        countPoints(game);
+
+        if (game.gamePoints.EW.games === 2 || game.gamePoints.NS.games === 2) {
+          setEndGame(game);
+        }
+
+        setNewDeal(turn, result.gameId);
+        return;
+      }
 
       const payload = {
         method: 'bestThrow',
-        turn: setTurn(bestThrow.place),
-        thrownCards,
+        turn,
+        thrownCards: game.thrownCards,
+        throws: game.throws,
+        gamePoints: game.gamePoints,
       };
 
-      activeUsers.forEach(usr => {
-        if (usr.uuid) {
-          clients[usr.uuid].connection.send(JSON.stringify(payload));
-        }
-      });
+      setTimeout(() => sendPayload(payload, result.gameId), 1000);
     };
 
     if (result.method === 'clean') {
-      const { clientId } = result;
+      // const { clientId } = result;
 
-      activeUsers = activeUsers.map((user) => user.uuid === clientId ? { ...initialUser, place: user.place } : user);
+      // activeUsers = activeUsers.map((user) => user.uuid === clientId ? { ...initialUser, place: user.place } : user);
 
-      const cleanPayload = {
-        method: 'clean',
-        clientId,
-        users: activeUsers,
-      };
+      // const cleanPayload = {
+      //   method: 'clean',
+      //   clientId,
+      //   users: activeUsers,
+      // };
 
-      const con = clients[clientId].connection;
-      con.send(JSON.stringify(cleanPayload));
+      // const con = clients[clientId].connection;
+      // con.send(JSON.stringify(cleanPayload));
     }
   })
 });
@@ -253,9 +319,177 @@ app.get('/', (req, res) => res.send('SIEMA'));
 
 server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));
 
-const setBestThrow = (cards) => {
+const setEndGame = (game: any) => {
+  const winningPair = game.gamePoints.NS.games === 2 ? 'NS' : 'EW';
+
+  const payload = {
+    method: 'endGame',
+    gamePoints: game.gamePoints,
+    winningPair,
+  };
+
+  game.players.forEach(player => {
+    if (player.uuid) {
+      clients[player.uuid].connection.send(JSON.stringify(payload));
+    }
+  });
+};
+
+const countPoints = (game: any) => {
+  const bestBidValue = parseInt(game.bestBid.value, 10);
+  const bestBidPair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'NS' : 'EW';
+  const oppositePair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'EW' : 'NS';
+  const isAfterPart = game.gamePoints.afterPart.includes(bestBidPair);
+  const isOpositeAfterPart = game.gamePoints.afterPart.includes(oppositePair);
+  const gameNumber = game.gamePoints.games;
+  let pointsUnder = game.gamePoints[bestBidPair].under[gameNumber];
+  let pointsAbove = game.gamePoints[bestBidPair].above;
+
+  if (game.gamePoints[bestBidPair].round >= bestBidValue + 6) {
+    const surplus = game.gamePoints[bestBidPair].round - (bestBidValue + 6);
+
+    if (!game.bestBid.doubled && !game.bestBid.redoubled && (!isAfterPart || isAfterPart)) {
+      if (game.bestBid.colorName !== 'NT') {
+        pointsUnder += bestBidValue * pointsValues.normal[game.bestBid.colorName];
+      } else {
+        pointsUnder += (bestBidValue * pointsValues.normal.NT) + 10;
+      }
+      pointsAbove += surplus * pointsValues.normal[game.bestBid.colorName];
+    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
+      if (game.bestBid.colorName !== 'NT') {
+        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
+      } else {
+        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
+      }
+      pointsAbove += surplus * 100;
+    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
+      if (game.bestBid.colorName !== 'NT') {
+        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
+      } else {
+        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
+      }
+      pointsAbove += surplus * 200;
+    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
+      if (game.bestBid.colorName !== 'NT') {
+        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
+      } else {
+        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
+      }
+      pointsAbove += surplus * 200;
+    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
+      if (game.bestBid.colorName !== 'NT') {
+        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
+      } else {
+        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
+      }
+      pointsAbove += surplus * 400;
+    }
+
+    if (game.gamePoints[bestBidPair].round === 12 && !isAfterPart) {
+      pointsAbove += 500;
+    } else if (game.gamePoints[bestBidPair].round === 12 && isAfterPart) {
+      pointsAbove += 750;
+    }
+
+    if (game.gamePoints[bestBidPair].round === 13 && !isAfterPart) {
+      pointsAbove += 1000;
+    } else if (game.gamePoints[bestBidPair].round === 13 && isAfterPart) {
+      pointsAbove += 1500;
+    }
+
+    if (pointsUnder >= 100) {
+      if (!isAfterPart) {
+        game.gamePoints.afterPart.push(bestBidPair);
+      }
+
+      game.gamePoints[bestBidPair].games += 1;
+      game.gamePoints.games += 1;
+      game.gamePoints.EW.under.push(0);
+      game.gamePoints.NS.under.push(0);
+
+      if (game.gamePoints[bestBidPair].games === 2 && isOpositeAfterPart) {
+        pointsAbove += 500;
+      } else if (game.gamePoints[bestBidPair].games === 2 && !isOpositeAfterPart) {
+        pointsAbove += 700;
+      }
+    }
+
+  } else {
+    const setbackCount = (bestBidValue + 6) - game.gamePoints[bestBidPair].round;
+
+    if (!game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
+      pointsAbove += setbackCount * 50;
+    } else if (!game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
+      pointsAbove += setbackCount * 100;
+    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
+      pointsAbove += 100;
+      if (setbackCount <= 3 && setbackCount > 1) {
+        pointsAbove += 400;
+      } else if (setbackCount > 3) {
+        pointsAbove += ((setbackCount - 3) * 300) + 400;
+      }
+    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
+      pointsAbove += 200;
+      if (setbackCount > 1) {
+        pointsAbove += (setbackCount - 1) * 300;
+      }
+    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
+      pointsAbove += 200;
+      if (setbackCount <= 3 && setbackCount > 1) {
+        pointsAbove += 800;
+      } else if (setbackCount > 3) {
+        pointsAbove += ((setbackCount - 3) * 600) + 800;
+      }
+    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
+      pointsAbove += 400;
+      if (setbackCount > 1) {
+        pointsAbove += (setbackCount - 1) * 600;
+      }
+    }
+  }
+
+  game.gamePoints[bestBidPair].under[gameNumber] = pointsUnder;
+  game.gamePoints[bestBidPair].above = pointsAbove;
+};
+
+const resetGameState = (game: any) => {
+  game.biddingHistory = [];
+  game.throws = [];
+  game.gamePoints.NS.round = 0;
+  game.gamePoints.EW.round = 0;
+  game.passCount = 0;
+  game.selectedCards = [];
+  game.statuses.gameStarted = false;
+  game.statuses.auctionStarted = true;
+  game.bestBid = { ...initialBestBid };
+};
+
+const setNewDeal = (turn: any, gameId: number) => {
+  const game = games[gameId];
+
+  resetGameState(game);
+
+  game.players = game.players.map((player) => ({ ...player, cards: setCards(game), cardsAmount: 13 }));
+
+  game.players.forEach(player => {
+    if (player.uuid) {
+      const preparedPlayers = preparePlayersToSend(game, player.uuid);
+      const payload = {
+        method: 'newDeal',
+        turn,
+        gamePoints: game.gamePoints,
+        statuses: game.statuses,
+        players: preparedPlayers,
+      };
+      clients[player.uuid].connection.send(JSON.stringify(payload));
+    }
+  });
+};
+
+const setBestThrow = (game) => {
   let best = { name: undefined, place: undefined, value: undefined, color: undefined };
-  cards.forEach((card: any) => {
+
+  game.thrownCards.forEach((card: any) => {
     if (!best.name) {
       best = card;
       return;
@@ -263,23 +497,36 @@ const setBestThrow = (cards) => {
 
     if (card.color === best.color && cardWeights[card.value] > cardWeights[best.value]) {
       best = card;
-    } else if (card.color !== best.color && card.color === bestBid.colorName && best.color !== bestBid.colorName) {
+    } else if (card.color !== best.color && card.color === game.bestBid.colorName && best.color !== game.bestBid.colorName) {
       best = card;
     }
   });
+
   return best;
 };
 
-const setTurn = (place) => ({
+const setTurn = (place, gameId: number) => ({
   place: place,
-  name: setTurnPlace(place),
+  name: setTurnPlace(place, gameId),
 });
 
-const setBestBid = (bid, best) => {
-  let bestBid = { ...best };
+const setBestBid = (bid, game) => {
+  let bestBid = { ...game.bestBid };
 
-  if (bid.colorName !== bestBid.colorName || bid.value !== bestBid.value) {
-    bestBid = { ...bid };
+  if (!bid.pass) {
+    bestBid = { ...bestBid, doubled: bid.doubled, redoubled: bid.redoubled };
+
+    if ((bid.colorName && bid.colorName !== bestBid.colorName) || (bid.value && bid.value !== bestBid.value)) {
+      let bestBidPlayer;
+  
+      game.biddingHistory.forEach((biddingBid) => {
+        if (!bestBidPlayer && dummyPlace[bid.place] === biddingBid.place && bid.colorName === biddingBid.colorName) {
+          bestBidPlayer = biddingBid.place;
+        }
+      });
+  
+      bestBid = { ...bid, place: bestBidPlayer || bid.place };
+    }
   }
 
   return bestBid;
@@ -304,14 +551,14 @@ const filterCards = (cards, card) => {
   return filteredCards;
 };
 
-const checkIsDummy = (dummyPlayer, player) => dummyPlayer && player.place === dummyPlace[bestBid.place];
+const checkIsDummy = (dummyPlayer, player, bestBidPlace) => dummyPlayer && player.place === bestBidPlace;
 const checkIsBestBid = (uuid, dummyPlayer, player) => dummyPlayer && dummyPlace[dummyPlayer.place] === player.place && uuid === dummyPlayer.uuid;
 
-const preparePlayersToSend = (uuid?: string, dummyPlayer?: any) => {
-  let preparedPlayers = [...activeUsers];
+const preparePlayersToSend = (game: any, uuid?: string, dummyPlayer?: any) => {
+  let preparedPlayers = [...game.players];
 
   preparedPlayers = preparedPlayers.map((player) => {
-    const isDummy = checkIsDummy(dummyPlayer, player);
+    const isDummy = checkIsDummy(dummyPlayer, player, dummyPlace[game.bestBid.place]);
     const isBestBid = checkIsBestBid(uuid, dummyPlayer, player);
 
     if (uuid === player.uuid || (dummyPlayer && (isDummy || isBestBid))) {
@@ -324,30 +571,31 @@ const preparePlayersToSend = (uuid?: string, dummyPlayer?: any) => {
   return preparedPlayers;
 };
 
-const updateThrow = (payload) => {
-  const dummyPlayer = activeUsers.filter((player) => player.place === dummyPlace[bestBid.place]);
+const updateThrow = (payload, gameId: number) => {
+  const game = games[gameId];
+  const dummyPlayer = game.players.filter((player) => player.place === dummyPlace[game.bestBid.place]);
 
-  activeUsers.forEach(usr => {
-    if (usr.uuid) {
-      const preparedPlayers = preparePlayersToSend(usr.uuid, dummyPlayer[0]);
-      clients[usr.uuid].connection.send(JSON.stringify({ ...payload, users: preparedPlayers }));
+  game.players.forEach(player => {
+    if (player.uuid) {
+      const preparedPlayers = preparePlayersToSend(game, player.uuid, dummyPlayer[0]);
+      clients[player.uuid].connection.send(JSON.stringify({ ...payload, players: preparedPlayers }));
     }
   });
 };
 
-const updateGameState = () => {
-  activeUsers.forEach(usr => {
-    const preparedPlayers = preparePlayersToSend(usr.uuid);
-    if (usr.uuid) {
-      clients[usr.uuid].connection.send(JSON.stringify({ method: 'updatePlaces', users: preparedPlayers }));
+const updateGameState = (gameId: number) => {
+  games[gameId].players.forEach(player => {
+    const preparedPlayers = preparePlayersToSend(games[gameId], player.uuid);
+    if (player.uuid) {
+      clients[player.uuid].connection.send(JSON.stringify({ method: 'updatePlaces', users: preparedPlayers }));
     }
   });
 };
 
-const setPlayerTurn = (turn) => {
-  activeUsers.forEach(usr => {
-    if (usr.uuid) {
-      clients[usr.uuid].connection.send(JSON.stringify({ method: 'turn', turn }));
+const sendPayload = (payload, gameId: number) => {
+  games[gameId].players.forEach(player => {
+    if (player.uuid) {
+      clients[player.uuid].connection.send(JSON.stringify(payload));
     }
   })
 };
