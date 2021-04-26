@@ -1,7 +1,7 @@
 import { response } from 'express';
 import { cardWeights, dummyPlace, openedPlaceType, pointsValues, turnPlaces } from './utils/dict';
 import { getRandomInt } from './utils/randomInt';
-import { setCards, resetSelectedCards } from './utils/setCards';
+import { setCards } from './utils/setCards';
 
 const uuid = require('uuid');
 const express = require('express');
@@ -19,13 +19,20 @@ interface Player {
   isReady: boolean;
 }
 
-// // App setup
+// App setup
 const PORT = 5000;
 const clients = {};
 const wss = new WebSocket.Server({ server: server });
 
+const initialPlayer = { takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false };
 const initialBestBid = { userName: undefined, colorName: undefined, value: undefined, place: undefined, doubled: false, redoubled: false };
-const initialGamePoints = { NS: { under: [0], above: 0, round: 0, games: 0 }, EW: { under: [0], above: 0, round: 0, games: 0 }, afterPart: [], games: 0 };
+const initialGamePoints = { NS: { score: 0, under: [0], above: 0, round: 0, games: 0 }, EW: { score: 0, under: [0], above: 0, round: 0, games: 0 }, afterPart: [], games: 0 };
+const initialStatuses = {
+  gameStarted: false,
+  auctionStarted: false,
+  showCountDown: false,
+  endGame: false,
+};
 
 const players: Player[] = [
   { place: 'N', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
@@ -34,9 +41,8 @@ const players: Player[] = [
   { place: 'W', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
 ];
 
-const game = {
+const initGame = {
   gameId: undefined,
-  clientId: undefined,
   name: undefined,
   passCount: 0,
   playersCount: 0,
@@ -48,14 +54,14 @@ const game = {
   bestBid: { ...initialBestBid },
   players: [...players],
   gamePoints: { ...initialGamePoints },
-  statuses: {
-    gameStarted: false,
-    auctionStarted: false,
-    showCountDown: false,
-  }
+  statuses: { ...initialStatuses },
 };
 
-const games = [game, game, game, game, game, game, game, game, game, game].map((game, i) => ({ ...game, gameId: i }));
+const games = [];
+
+for (let i = 0; i < 10; i++) {
+  games.push({ ...initGame, gameId: i });
+};
 
 const setTurnPlace = (turn: string, gameId: number) => {
   const player = games[gameId].players.filter((player: Player) => player.place === turn);
@@ -159,7 +165,7 @@ const updateBid = (gameId: number, bid: any, turn: any) => {
   const payload = {
     method: 'bid',
     bid,
-    turn: newTurn,
+    turn: isBiddingFinished ? game.turn : newTurn,
     bestBid: game.bestBid,
     biddingHistory: game.biddingHistory,
     statuses: game.statuses,
@@ -278,12 +284,13 @@ wss.on('connection', function connection(ws, request, client) {
 
       if (game.throws.length === 13) {
         countPoints(game);
+        const isEndGame = game.gamePoints.EW.games === 2 || game.gamePoints.NS.games === 2;
 
-        if (game.gamePoints.EW.games === 2 || game.gamePoints.NS.games === 2) {
-          setEndGame(game);
+        if (isEndGame) {
+          setEndGame(game, result.gameId);
+        } else {
+          setNewDeal(turn, result.gameId);
         }
-
-        setNewDeal(turn, result.gameId);
         return;
       }
 
@@ -298,19 +305,30 @@ wss.on('connection', function connection(ws, request, client) {
       setTimeout(() => sendPayload(payload, result.gameId), 1000);
     };
 
+    if (result.method === 'resetGame') {
+      const { gameId } = result;
+      const game = { ...initGame, selectedCards: [], gameId, statuses: { ...initialStatuses } };
+
+      const payload = {
+        method: 'resetGame',
+        game: game,
+      };
+
+      sendPayload(payload, gameId);
+      games[gameId] = { ...game };
+    }
+
     if (result.method === 'clean') {
-      // const { clientId } = result;
+      const { clientId, gameId } = result;
 
-      // activeUsers = activeUsers.map((user) => user.uuid === clientId ? { ...initialUser, place: user.place } : user);
+      const payload = {
+        method: 'clean',
+        game: games[gameId],
+        clientId,
+      };
 
-      // const cleanPayload = {
-      //   method: 'clean',
-      //   clientId,
-      //   users: activeUsers,
-      // };
-
-      // const con = clients[clientId].connection;
-      // con.send(JSON.stringify(cleanPayload));
+      sendPayload(payload, gameId);
+      games[gameId].players = games[gameId].players.map((player) => player.uuid === clientId ? { ...initialPlayer, place: player.place } : player);
     }
   })
 });
@@ -319,20 +337,31 @@ app.get('/', (req, res) => res.send('SIEMA'));
 
 server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));
 
-const setEndGame = (game: any) => {
-  const winningPair = game.gamePoints.NS.games === 2 ? 'NS' : 'EW';
+const setScore = (game: any) => {
+  let scoreNs = 0;
+  let scoreEw = 0;
+
+  scoreNs += game.gamePoints.NS.above;
+  scoreNs += game.gamePoints.NS.under.reduce((val, sum) => val + sum);
+
+  scoreEw += game.gamePoints.EW.above;
+  scoreEw += game.gamePoints.EW.under.reduce((val, sum) => val + sum);
+
+  game.gamePoints.NS.score = scoreNs;
+  game.gamePoints.EW.score = scoreEw;
+}
+
+const setEndGame = (game: any, gameId: number) => {
+  setScore(game);
+  game.statuses.endGame = true;
 
   const payload = {
     method: 'endGame',
     gamePoints: game.gamePoints,
-    winningPair,
+    statuses: game.statuses,
   };
 
-  game.players.forEach(player => {
-    if (player.uuid) {
-      clients[player.uuid].connection.send(JSON.stringify(payload));
-    }
-  });
+  sendPayload(payload, gameId);
 };
 
 const countPoints = (game: any) => {

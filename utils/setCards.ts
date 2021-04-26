@@ -19,12 +19,8 @@ let cards = [
 const cardValuesWeights = {
   '2': 1, '3': 2, '4': 3, '5': 4, '6': 5, '7': 6, '8': 7, '9': 8, '10': 9, 'J': 10, 'Q': 11, 'K': 12, 'A': 13,
 };
-const cardColorWeight = {
-  S: 1,
-  H: 0.75,
-  D: 0.5,
-  C: 0.25,
-};
+
+const cardColorWeight = { S: 1, H: 0.75, D: 0.5, C: 0.25 };
 
 export const resetSelectedCards = () => {
   selectedCards = [];
