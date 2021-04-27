@@ -1,5 +1,8 @@
 import { response } from 'express';
+import { countPoints } from './utils/countPoints';
 import { cardWeights, dummyPlace, openedPlaceType, pointsValues, turnPlaces } from './utils/dict';
+import { games, initialBestBid, initialGamePoints, initialPlayer, initialStatuses, players } from './utils/initialValues';
+import { setNewGame } from './utils/newGame';
 import { getRandomInt } from './utils/randomInt';
 import { setCards } from './utils/setCards';
 
@@ -24,43 +27,9 @@ const PORT = 5000;
 const clients = {};
 const wss = new WebSocket.Server({ server: server });
 
-const initialPlayer = { takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false };
-const initialBestBid = { userName: undefined, colorName: undefined, value: undefined, place: undefined, doubled: false, redoubled: false };
-const initialGamePoints = { NS: { score: 0, under: [0], above: 0, round: 0, games: 0 }, EW: { score: 0, under: [0], above: 0, round: 0, games: 0 }, afterPart: [], games: 0 };
-const initialStatuses = {
-  gameStarted: false,
-  auctionStarted: false,
-  showCountDown: false,
-  endGame: false,
-};
-
-const players: Player[] = [
-  { place: 'N', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'S', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'E', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
-  { place: 'W', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
-];
-
-const initGame = {
-  gameId: undefined,
-  name: undefined,
-  passCount: 0,
-  playersCount: 0,
-  throws: [],
-  thrownCards: [],
-  selectedCards: [],
-  biddingHistory: [],
-  turn: { name: undefined, place: undefined },
-  bestBid: { ...initialBestBid },
-  players: [...players],
-  gamePoints: { ...initialGamePoints },
-  statuses: { ...initialStatuses },
-};
-
-const games = [];
-
 for (let i = 0; i < 10; i++) {
-  games.push({ ...initGame, gameId: i });
+  const game = setNewGame(i);
+  games.push({ ...game });
 };
 
 const setTurnPlace = (turn: string, gameId: number) => {
@@ -118,7 +87,7 @@ const setInitialTurn = (game: any, gameId: number) => {
     statuses: game.statuses,
   };
 
-  updateGameState(gameId);
+  updateGameState(gameId, 'update');
   sendPayload(payload, gameId);
 };
 
@@ -150,13 +119,13 @@ const checkIfBiddingFinished = (game: any, gameId: number) => {
 }
 
 const updateBid = (gameId: number, bid: any, turn: any) => {
-  const newTurn = setTurn(turnPlaces[turn.place], gameId);
   const game = games[gameId];
+  game.turn = setTurn(turnPlaces[turn.place], gameId);
 
   updateBidValues(game, bid);
 
   if (game.biddingHistory.length === 4 && game.passCount === 4) {
-    setNewDeal(newTurn, gameId);
+    setNewDeal(gameId);
     return;
   }
 
@@ -165,7 +134,7 @@ const updateBid = (gameId: number, bid: any, turn: any) => {
   const payload = {
     method: 'bid',
     bid,
-    turn: isBiddingFinished ? game.turn : newTurn,
+    turn: game.turn,
     bestBid: game.bestBid,
     biddingHistory: game.biddingHistory,
     statuses: game.statuses,
@@ -184,7 +153,7 @@ const updateGamePoints = (game, bestThrow) => {
 
   game.throws = [...game.throws, bestThrow];
   game.thrownCards = [];
-}
+};
 
 const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
   game.thrownCards = [...game.thrownCards, card];
@@ -195,56 +164,45 @@ const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
   } : player);
 
   game.players = updatedCards;
-}
+};
 
 wss.on('connection', function connection(ws, request, client) {
   //generate a new clientId
   let clientId = uuid.v4();
-  let gameId;
 
   ws.on("message", (message) => {
     const result = JSON.parse(message);
 
     if (result.method === 'connect') {
-      // let users = preparePlayersToSend();
+      if (result.clientId) {
+        clientId = result.clientId;
+      }
+
       clients[clientId] = {
         connection: ws,
       };
-      // if (!result.clientId) {
-      //   clients[clientId] = {
-      //     connection: ws,
-      //   };
-      // } else {
-      //   clientId = result.clientId;
-      //   users = preparePlayersToSend(clientId);
-      // }
 
       const payLoad = {
           method: "connect",
           clientId: clientId,
-          games,
+          games: prepareGames(clientId),
       };
 
       //send back the client connect
       ws.send(JSON.stringify(payLoad));
     }
 
-    if (result.method === 'selectTable') {
-      gameId = result.gameId;
-      console.log(gameId);
-    }
-
     if (result.method === 'join') {
       const { clientId, gameId, place, userName } = result;
 
       choosePlace(gameId, clientId, place, userName);
-      updateGameState(gameId);
+      updateGameState(gameId, 'update');
     }
 
     if (result.method === 'ready') {
       const { clientId, gameId } = result;
       setPlayerReady(gameId, clientId);
-      updateGameState(gameId);
+      updateGameState(gameId, 'update');
     }
 
     if (result.method === 'startBidding') {
@@ -262,13 +220,13 @@ wss.on('connection', function connection(ws, request, client) {
     if (result.method === 'throw') {
       const { card, gameId, turn } = result;
       const game = games[gameId];
-      const newTurn = setTurn(turnPlaces[turn.place], gameId);
+      game.turn = setTurn(turnPlaces[turn.place], gameId);
 
       updatePlayerCardsAmount(game, card, turn);
 
       const payload = {
         method: 'throw',
-        turn: newTurn,
+        turn: game.turn,
         thrownCards: game.thrownCards,
       };
 
@@ -278,7 +236,7 @@ wss.on('connection', function connection(ws, request, client) {
     if (result.method === 'bestThrow' && games[result.gameId].thrownCards.length === 4) {
       const game = games[result.gameId];
       let bestThrow = setBestThrow(game);
-      const turn = setTurn(bestThrow.place, result.gameId);
+      game.turn = setTurn(bestThrow.place, result.gameId);
 
       updateGamePoints(game, bestThrow);
 
@@ -289,14 +247,14 @@ wss.on('connection', function connection(ws, request, client) {
         if (isEndGame) {
           setEndGame(game, result.gameId);
         } else {
-          setNewDeal(turn, result.gameId);
+          setNewDeal(result.gameId);
         }
         return;
       }
 
       const payload = {
         method: 'bestThrow',
-        turn,
+        turn: game.turn,
         thrownCards: game.thrownCards,
         throws: game.throws,
         gamePoints: game.gamePoints,
@@ -307,35 +265,21 @@ wss.on('connection', function connection(ws, request, client) {
 
     if (result.method === 'resetGame') {
       const { gameId } = result;
-      const game = { ...initGame, selectedCards: [], gameId, statuses: { ...initialStatuses } };
+      const game = setNewGame(gameId);
 
-      const payload = {
-        method: 'resetGame',
-        game: game,
-      };
-
-      sendPayload(payload, gameId);
       games[gameId] = { ...game };
+      updateGameState(gameId, 'resetGame');
     }
 
     if (result.method === 'clean') {
       const { clientId, gameId } = result;
 
-      const payload = {
-        method: 'clean',
-        game: games[gameId],
-        clientId,
-      };
-
-      sendPayload(payload, gameId);
       games[gameId].players = games[gameId].players.map((player) => player.uuid === clientId ? { ...initialPlayer, place: player.place } : player);
+
+      updateGameState(gameId, 'update');
     }
   })
 });
-
-app.get('/', (req, res) => res.send('SIEMA'));
-
-server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));
 
 const setScore = (game: any) => {
   let scoreNs = 0;
@@ -364,123 +308,6 @@ const setEndGame = (game: any, gameId: number) => {
   sendPayload(payload, gameId);
 };
 
-const countPoints = (game: any) => {
-  const bestBidValue = parseInt(game.bestBid.value, 10);
-  const bestBidPair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'NS' : 'EW';
-  const oppositePair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'EW' : 'NS';
-  const isAfterPart = game.gamePoints.afterPart.includes(bestBidPair);
-  const isOpositeAfterPart = game.gamePoints.afterPart.includes(oppositePair);
-  const gameNumber = game.gamePoints.games;
-  let pointsUnder = game.gamePoints[bestBidPair].under[gameNumber];
-  let pointsAbove = game.gamePoints[bestBidPair].above;
-
-  if (game.gamePoints[bestBidPair].round >= bestBidValue + 6) {
-    const surplus = game.gamePoints[bestBidPair].round - (bestBidValue + 6);
-
-    if (!game.bestBid.doubled && !game.bestBid.redoubled && (!isAfterPart || isAfterPart)) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.normal[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.normal.NT) + 10;
-      }
-      pointsAbove += surplus * pointsValues.normal[game.bestBid.colorName];
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
-      }
-      pointsAbove += surplus * 100;
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
-      }
-      pointsAbove += surplus * 200;
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
-      }
-      pointsAbove += surplus * 200;
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
-      }
-      pointsAbove += surplus * 400;
-    }
-
-    if (game.gamePoints[bestBidPair].round === 12 && !isAfterPart) {
-      pointsAbove += 500;
-    } else if (game.gamePoints[bestBidPair].round === 12 && isAfterPart) {
-      pointsAbove += 750;
-    }
-
-    if (game.gamePoints[bestBidPair].round === 13 && !isAfterPart) {
-      pointsAbove += 1000;
-    } else if (game.gamePoints[bestBidPair].round === 13 && isAfterPart) {
-      pointsAbove += 1500;
-    }
-
-    if (pointsUnder >= 100) {
-      if (!isAfterPart) {
-        game.gamePoints.afterPart.push(bestBidPair);
-      }
-
-      game.gamePoints[bestBidPair].games += 1;
-      game.gamePoints.games += 1;
-      game.gamePoints.EW.under.push(0);
-      game.gamePoints.NS.under.push(0);
-
-      if (game.gamePoints[bestBidPair].games === 2 && isOpositeAfterPart) {
-        pointsAbove += 500;
-      } else if (game.gamePoints[bestBidPair].games === 2 && !isOpositeAfterPart) {
-        pointsAbove += 700;
-      }
-    }
-
-  } else {
-    const setbackCount = (bestBidValue + 6) - game.gamePoints[bestBidPair].round;
-
-    if (!game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
-      pointsAbove += setbackCount * 50;
-    } else if (!game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
-      pointsAbove += setbackCount * 100;
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
-      pointsAbove += 100;
-      if (setbackCount <= 3 && setbackCount > 1) {
-        pointsAbove += 400;
-      } else if (setbackCount > 3) {
-        pointsAbove += ((setbackCount - 3) * 300) + 400;
-      }
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
-      pointsAbove += 200;
-      if (setbackCount > 1) {
-        pointsAbove += (setbackCount - 1) * 300;
-      }
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
-      pointsAbove += 200;
-      if (setbackCount <= 3 && setbackCount > 1) {
-        pointsAbove += 800;
-      } else if (setbackCount > 3) {
-        pointsAbove += ((setbackCount - 3) * 600) + 800;
-      }
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
-      pointsAbove += 400;
-      if (setbackCount > 1) {
-        pointsAbove += (setbackCount - 1) * 600;
-      }
-    }
-  }
-
-  game.gamePoints[bestBidPair].under[gameNumber] = pointsUnder;
-  game.gamePoints[bestBidPair].above = pointsAbove;
-};
-
 const resetGameState = (game: any) => {
   game.biddingHistory = [];
   game.throws = [];
@@ -493,26 +320,12 @@ const resetGameState = (game: any) => {
   game.bestBid = { ...initialBestBid };
 };
 
-const setNewDeal = (turn: any, gameId: number) => {
+const setNewDeal = (gameId: number) => {
   const game = games[gameId];
-
   resetGameState(game);
 
   game.players = game.players.map((player) => ({ ...player, cards: setCards(game), cardsAmount: 13 }));
-
-  game.players.forEach(player => {
-    if (player.uuid) {
-      const preparedPlayers = preparePlayersToSend(game, player.uuid);
-      const payload = {
-        method: 'newDeal',
-        turn,
-        gamePoints: game.gamePoints,
-        statuses: game.statuses,
-        players: preparedPlayers,
-      };
-      clients[player.uuid].connection.send(JSON.stringify(payload));
-    }
-  });
+  updateGameState(gameId, 'update');
 };
 
 const setBestThrow = (game) => {
@@ -612,15 +425,6 @@ const updateThrow = (payload, gameId: number) => {
   });
 };
 
-const updateGameState = (gameId: number) => {
-  games[gameId].players.forEach(player => {
-    const preparedPlayers = preparePlayersToSend(games[gameId], player.uuid);
-    if (player.uuid) {
-      clients[player.uuid].connection.send(JSON.stringify({ method: 'updatePlaces', users: preparedPlayers }));
-    }
-  });
-};
-
 const sendPayload = (payload, gameId: number) => {
   games[gameId].players.forEach(player => {
     if (player.uuid) {
@@ -628,3 +432,23 @@ const sendPayload = (payload, gameId: number) => {
     }
   })
 };
+
+const prepareGames = (uuid: string) => {
+  let preparedGames = games.map((game: any) => {
+    const players = preparePlayersToSend(game, uuid);
+    return { ...game, players };
+  });
+
+  return preparedGames;
+};
+
+const updateGameState = (gameId: number, method: string) => {
+  Object.keys(clients).forEach((client: any) => {
+    const preparedGames = prepareGames(client);
+    clients[client].connection.send(JSON.stringify({ method, gameId, games: preparedGames }));
+  });
+};
+
+app.get('/', (req, res) => res.send('SIEMA'));
+
+server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));
