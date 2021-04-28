@@ -2,6 +2,7 @@ export const initialPlayer = { takenPlace: false, uuid: undefined, name: undefin
 export const initialBestBid = { userName: undefined, colorName: undefined, value: undefined, place: undefined, doubled: false, redoubled: false };
 export const initialGamePoints = { NS: { score: 0, under: [0], above: 0, round: 0, games: 0 }, EW: { score: 0, under: [0], above: 0, round: 0, games: 0 }, afterPart: [], games: 0 };
 export const initialStatuses = {
+  waitingForPlayers: false,
   gameStarted: false,
   auctionStarted: false,
   showCountDown: false,
@@ -15,4 +16,9 @@ export const players: any = [
   { place: 'W', takenPlace: false, uuid: undefined, name: undefined, cards: [], cardsAmount: 0, isReady: false },
 ];
 
+export const setWaitingPlayers = (waiting: any) => {
+  waitingPlayers = waiting;
+};
+
+export let waitingPlayers = [];
 export const games = [];

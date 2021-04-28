@@ -1,7 +1,7 @@
 import { response } from 'express';
 import { countPoints } from './utils/countPoints';
 import { cardWeights, dummyPlace, openedPlaceType, pointsValues, turnPlaces } from './utils/dict';
-import { games, initialBestBid, initialGamePoints, initialPlayer, initialStatuses, players } from './utils/initialValues';
+import { games, initialBestBid, initialGamePoints, initialPlayer, initialStatuses, players, setWaitingPlayers, waitingPlayers } from './utils/initialValues';
 import { setNewGame } from './utils/newGame';
 import { getRandomInt } from './utils/randomInt';
 import { setCards } from './utils/setCards';
@@ -166,6 +166,37 @@ const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
   game.players = updatedCards;
 };
 
+const checkIfWaiting = (clientId: string) => {
+  let index;
+
+  waitingPlayers.forEach((item: any, i: number) => {
+    if (item.clientId === clientId) {
+      games[item.gameId].statuses.waitingForPlayers = false;
+      updateGameState(item.gameId, 'update');
+      index = i;
+    }
+  });
+
+  if (index) waitingPlayers.splice(index, 1);
+};
+
+const clearWaitingPlayers = (gameId: number) => {
+  const waiting = waitingPlayers.filter((item: any) => item.gameId !== gameId);
+  setWaitingPlayers(waiting);
+};
+
+const checkPlayersLeft = (gameId) => {
+  let playersLeft = 0;
+
+  waitingPlayers.forEach((item: any) => {
+    if (item.gameId === gameId) {
+      playersLeft += 1;
+    }
+  });
+
+  return playersLeft;
+};
+
 wss.on('connection', function connection(ws, request, client) {
   //generate a new clientId
   let clientId = uuid.v4();
@@ -176,6 +207,7 @@ wss.on('connection', function connection(ws, request, client) {
     if (result.method === 'connect') {
       if (result.clientId) {
         clientId = result.clientId;
+        checkIfWaiting(clientId);
       }
 
       clients[clientId] = {
@@ -268,6 +300,7 @@ wss.on('connection', function connection(ws, request, client) {
       const game = setNewGame(gameId);
 
       games[gameId] = { ...game };
+      clearWaitingPlayers(gameId);
       updateGameState(gameId, 'resetGame');
     }
 
@@ -277,6 +310,24 @@ wss.on('connection', function connection(ws, request, client) {
       games[gameId].players = games[gameId].players.map((player) => player.uuid === clientId ? { ...initialPlayer, place: player.place } : player);
 
       updateGameState(gameId, 'update');
+    }
+
+    if (result.method === 'disconnect') {
+      const { clientId, gameId } = result;
+
+      if (clientId && (gameId || gameId === 0)) {
+        waitingPlayers.push({ clientId, gameId });
+        games[gameId].statuses.waitingForPlayers = true;
+
+        const playersLeft = checkPlayersLeft(gameId);
+        if (playersLeft === 4) {
+          const game = setNewGame(gameId);
+          games[gameId] = { ...game };
+          updateGameState(gameId, 'reset');
+        } else {
+          updateGameState(gameId, 'update');
+        }
+      }
     }
   })
 });
