@@ -16,6 +16,7 @@
   },
   "include": [
     "src",
-    "app.js"
+    "app.js",
+    "tests"
   ]
 }

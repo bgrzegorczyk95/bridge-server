@@ -1,7 +1,8 @@
-import { response } from 'express';
+import { Player, Game, Bid, Turn, Throw, Card, Trump } from './@types/types';
+import * as WebSocket from 'ws';
 import { countPoints } from './utils/countPoints';
-import { cardWeights, dummyPlace, openedPlaceType, pointsValues, turnPlaces } from './utils/dict';
-import { games, initialBestBid, initialGamePoints, initialPlayer, initialStatuses, players, setWaitingPlayers, waitingPlayers } from './utils/initialValues';
+import { cardWeights, dummyPlace, openedPlaceType, turnPlaces } from './utils/dict';
+import { games, initialPlayer, initialTrump, setWaitingPlayers, waitingPlayers } from './utils/initialValues';
 import { setNewGame } from './utils/newGame';
 import { getRandomInt } from './utils/randomInt';
 import { setCards } from './utils/setCards';
@@ -10,42 +11,45 @@ const uuid = require('uuid');
 const express = require('express');
 const app = express();
 const server = require('http').createServer(app);
-const WebSocket = require('ws');
+const PORT = process.env.PORT || 5000;
 
-interface Player {
-  place: string;
-  takenPlace: boolean;
-  uuid?: string;
-  name?: string;
-  cards: any[];
-  cardsAmount: number;
-  isReady: boolean;
-}
+app.get('/', (req, res) => res.send('It works!'));
 
-// App setup
-const PORT = 5000;
-const clients = {};
+server.listen(PORT, () => console.log(`Started, port ${PORT}`));
+
 const wss = new WebSocket.Server({ server: server });
+
+const clients = {};
 
 for (let i = 0; i < 10; i++) {
   const game = setNewGame(i);
   games.push({ ...game });
+
+  const waiting = { ...waitingPlayers, [i]: [] };
+  setWaitingPlayers(waiting);
 };
 
-const setTurnPlace = (turn: string, gameId: number) => {
-  const player = games[gameId].players.filter((player: Player) => player.place === turn);
+const setTurnPlayerName = (turn: string, game: Game) => {
+  const player = game.players.filter((player: Player) => player.place === turn);
   return player[0].name;
 };
 
-const checkIfPlayerAlreadyInGame = (gameId: number, clientId: string) => {
-  const filteredPlayers = games[gameId].players.filter(player => player.uuid === clientId);
+export const setTurn = (place: string, game: Game) => {
+  const turn = { place: place, name: setTurnPlayerName(place, game) };
+  game.turn = turn;
+
+  return turn;
+};
+
+const checkIfPlayerAlreadyInGame = (game: Game, clientId: string) => {
+  const filteredPlayers = game.players.filter(player => player.uuid === clientId);
   return filteredPlayers.length;
 };
 
-const choosePlace = (gameId: number, clientId: string, place: string, userName: string) => {
-  const userAlreadyExists = checkIfPlayerAlreadyInGame(gameId, clientId);
+const choosePlace = (game: Game, clientId: string, place: string, userName: string) => {
+  const userAlreadyExists = checkIfPlayerAlreadyInGame(game, clientId);
 
-  games[gameId].players = games[gameId].players.map(player => {
+  game.players = game.players.map(player => {
     if (player.place === place && !userAlreadyExists && !player.takenPlace) {
       return {
         ...player,
@@ -58,8 +62,8 @@ const choosePlace = (gameId: number, clientId: string, place: string, userName: 
   });
 };
 
-const setPlayerReady = (gameId: number, clientId: string) => {
-  games[gameId].players = games[gameId].players.map((player) => {
+const setPlayerReady = (game: Game, clientId: string) => {
+  game.players = game.players.map((player) => {
     if (player.uuid === clientId) {
       return { ...player, isReady: !player.isReady };
     }
@@ -67,95 +71,67 @@ const setPlayerReady = (gameId: number, clientId: string) => {
   });
 };
 
-const setInitialCards = (game: any) => {
+export const setInitialCards = (game: Game) => {
   game.statuses.auctionStarted = true;
-  game.players = game.players.map((player: any) => {
+  
+  const players = game.players.map(player => {
     const cards = setCards(game);
     return ({ ...player, cards, cardsAmount: 13 })
   });
+
+  game.players = players;
+
+  return players;
 }
 
-const setInitialTurn = (game: any, gameId: number) => {
+const setInitialTurn = (game: Game, gameId: number) => {
   const player = game.players[getRandomInt(0, 3)];
-  game.turn = setTurn(player.place, gameId);
-
+  setTurn(player.place, game);
   setInitialCards(game)
-
-  const payload = {
-    method: 'startBidding',
-    turn: game.turn,
-    statuses: game.statuses,
-  };
-
   updateGameState(gameId, 'update');
-  sendPayload(payload, gameId);
 };
 
-const checkIfTurnEmpty = (gameId: number) => {
-  const game = games[gameId];
-
+const checkIfTurnEmpty = (game: Game, gameId: number) => {
   if (!game.turn.name) {
     setInitialTurn(game, gameId);
   }
 };
 
-const updateBidValues = (game: any, bid: any) => {
+const updateBidValues = (game: Game, bid: Bid) => {
   game.passCount = setPassCount(bid, game.passCount);
-  game.bestBid = setBestBid(bid, game);
+  game.trump = setTrump(bid, game);
   game.biddingHistory = [...game.biddingHistory, bid];
 };
 
-const checkIfBiddingFinished = (game: any, gameId: number) => {
-  let isBiddingFinished = false;
-
+const checkIfBiddingFinished = (game: Game) => {
   if (game.biddingHistory.length >= 4 && game.passCount === 3) {
-    game.turn = setTurn(openedPlaceType[game.bestBid.place], gameId);
+    setTurn(openedPlaceType[game.trump.place], game);
     game.statuses.auctionStarted = false;
     game.statuses.gameStarted = true;
-    isBiddingFinished = true;
   }
-
-  return isBiddingFinished;
 }
 
-const updateBid = (gameId: number, bid: any, turn: any) => {
-  const game = games[gameId];
-  game.turn = setTurn(turnPlaces[turn.place], gameId);
-
+const updateBid = (game: Game, gameId: number, bid: Bid, turn: Turn) => {
+  setTurn(turnPlaces[turn.place], game);
   updateBidValues(game, bid);
 
   if (game.biddingHistory.length === 4 && game.passCount === 4) {
-    setNewDeal(gameId);
+    setNewDeal(game, gameId);
     return;
   }
 
-  const isBiddingFinished = checkIfBiddingFinished(game, gameId);
-
-  const payload = {
-    method: 'bid',
-    bid,
-    turn: game.turn,
-    bestBid: game.bestBid,
-    biddingHistory: game.biddingHistory,
-    statuses: game.statuses,
-    isBiddingFinished,
-  };
-
-  sendPayload(payload, gameId);
+  checkIfBiddingFinished(game);
+  updateGameState(gameId, 'update');
 };
 
-const updateGamePoints = (game, bestThrow) => {
-  if (bestThrow.place === 'N' || bestThrow.place === 'S') {
-    game.gamePoints.NS.round += 1; 
-  } else {
-    game.gamePoints.EW.round += 1;
-  }
+const filterCards = (cards: Card[], card: Card) => {
+  let filteredCards = [...cards];
+  filteredCards = filteredCards.filter((c: any) => `${c.value}${c.color}` !== `${card.value}${card.color}`);
 
-  game.throws = [...game.throws, bestThrow];
-  game.thrownCards = [];
+  return filteredCards;
 };
 
-const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
+const updatePlayerCardsAmount = (game: Game, card: Throw, turn: Turn) => {
   game.thrownCards = [...game.thrownCards, card];
   const updatedCards = game.players.map((player: Player) => player.place === turn.place ? {
     ...player,
@@ -166,48 +142,82 @@ const updatePlayerCardsAmount = (game: any, card: any, turn: any) => {
   game.players = updatedCards;
 };
 
-const checkIfWaiting = (clientId: string) => {
-  let index;
+const checkIfWaiting = (gameId: number, clientId: string) => {
+  if (gameId || gameId === 0) {
+    const isPlayerInWaitingList = waitingPlayers[gameId].includes(clientId);
 
-  waitingPlayers.forEach((item: any, i: number) => {
-    if (item.clientId === clientId) {
-      games[item.gameId].statuses.waitingForPlayers = false;
-      updateGameState(item.gameId, 'update');
-      index = i;
+    if (isPlayerInWaitingList) {
+      const playerIndex = waitingPlayers[gameId].indexOf(clientId);
+      waitingPlayers[gameId].splice(playerIndex, 1);
+
+      if (!waitingPlayers[gameId].length) {
+        const game: Game = games[gameId];
+        game.statuses.waitingForPlayers = false;
+        updateGameState(gameId, 'update');
+      }
     }
-  });
-
-  if (index) waitingPlayers.splice(index, 1);
+  }
 };
 
 const clearWaitingPlayers = (gameId: number) => {
-  const waiting = waitingPlayers.filter((item: any) => item.gameId !== gameId);
+  const waiting = waitingPlayers[gameId] = [];
   setWaitingPlayers(waiting);
 };
 
-const checkPlayersLeft = (gameId) => {
-  let playersLeft = 0;
-
-  waitingPlayers.forEach((item: any) => {
-    if (item.gameId === gameId) {
-      playersLeft += 1;
-    }
-  });
-
-  return playersLeft;
+const checkIfEndGame = (game: Game, gameId: number) => {
+  const isEndGame = game.gamePoints.EW.games === 2 || game.gamePoints.NS.games === 2;
+  if (isEndGame) {
+    setEndGame(game, gameId);
+  } else {
+    setNewDeal(game, gameId);
+  }
 };
 
-wss.on('connection', function connection(ws, request, client) {
-  //generate a new clientId
+const updateRoundPoints = (game: Game, bestThrow: Throw) => {
+  if (bestThrow.place === 'N' || bestThrow.place === 'S') {
+    game.gamePoints.NS.round += 1; 
+  } else {
+    game.gamePoints.EW.round += 1;
+  }
+
+  game.throws = [...game.throws, bestThrow];
+  game.thrownCards = [];
+};
+
+const checkBestThrow = (game: Game, gameId: number) => {
+  let bestThrow = setBestThrow(game);
+  setTurn(bestThrow.place, game);
+  updateRoundPoints(game, bestThrow);
+
+  if (game.throws.length === 13) {
+    countPoints(game);
+    checkIfEndGame(game, gameId);
+    return;
+  }
+
+  setTimeout(() => updateGameState(gameId, 'update'), 1000);
+};
+
+const cleanGamePlace = (game: Game, gameId: number, clientId: string) => {
+  game.players = game.players.map((player) => player.uuid === clientId ? { ...initialPlayer, place: player.place } : player);
+  updateGameState(gameId, 'update');
+};
+
+const checkIfPlayerIsInGame = (game: Game, clientId: string) => {
+  return game.players.some((player: Player) => player.uuid === clientId);
+}
+
+wss.on('connection', function connection(ws: WebSocket) {
   let clientId = uuid.v4();
 
-  ws.on("message", (message) => {
+  ws.on("message", (message: string) => {
     const result = JSON.parse(message);
+    const game: Game = games[result.gameId];
 
     if (result.method === 'connect') {
       if (result.clientId) {
         clientId = result.clientId;
-        checkIfWaiting(clientId);
+        checkIfWaiting(result.gameId, clientId);
       }
 
       clients[clientId] = {
@@ -227,139 +237,112 @@ wss.on('connection', function connection(ws, request, client) {
     if (result.method === 'join') {
       const { clientId, gameId, place, userName } = result;
 
-      choosePlace(gameId, clientId, place, userName);
+      choosePlace(game, clientId, place, userName);
       updateGameState(gameId, 'update');
     }
 
     if (result.method === 'ready') {
       const { clientId, gameId } = result;
-      setPlayerReady(gameId, clientId);
+      setPlayerReady(game, clientId);
       updateGameState(gameId, 'update');
     }
 
     if (result.method === 'startBidding') {
       const { gameId } = result;
-
-      checkIfTurnEmpty(gameId);
+      checkIfTurnEmpty(game, gameId);
     }
 
     if (result.method === 'bid') {
       const { gameId, bid, turn } = result;
-
-      updateBid(gameId, bid, turn);
+      updateBid(game, gameId, bid, turn);
     };
 
     if (result.method === 'throw') {
       const { card, gameId, turn } = result;
-      const game = games[gameId];
-      game.turn = setTurn(turnPlaces[turn.place], gameId);
 
-      updatePlayerCardsAmount(game, card, turn);
-
-      const payload = {
-        method: 'throw',
-        turn: game.turn,
-        thrownCards: game.thrownCards,
-      };
-
-      updateThrow(payload, gameId);
-    };
-
-    if (result.method === 'bestThrow' && games[result.gameId].thrownCards.length === 4) {
-      const game = games[result.gameId];
-      let bestThrow = setBestThrow(game);
-      game.turn = setTurn(bestThrow.place, result.gameId);
-
-      updateGamePoints(game, bestThrow);
-
-      if (game.throws.length === 13) {
-        countPoints(game);
-        const isEndGame = game.gamePoints.EW.games === 2 || game.gamePoints.NS.games === 2;
-
-        if (isEndGame) {
-          setEndGame(game, result.gameId);
-        } else {
-          setNewDeal(result.gameId);
-        }
-        return;
+      if (!game.statuses.isDummyVisible) {
+        game.statuses.isDummyVisible = true;
       }
 
-      const payload = {
-        method: 'bestThrow',
-        turn: game.turn,
-        thrownCards: game.thrownCards,
-        throws: game.throws,
-        gamePoints: game.gamePoints,
-      };
+      setTurn(turnPlaces[turn.place], game);
+      updatePlayerCardsAmount(game, card, turn);
+      updateGameState(gameId, 'update');
 
-      setTimeout(() => sendPayload(payload, result.gameId), 1000);
+      if (game.thrownCards.length === 4) {
+        checkBestThrow(game, gameId);
+      }
     };
 
     if (result.method === 'resetGame') {
       const { gameId } = result;
-      const game = setNewGame(gameId);
+      const newGame = setNewGame(gameId);
 
-      games[gameId] = { ...game };
+      games[gameId] = { ...newGame };
       clearWaitingPlayers(gameId);
       updateGameState(gameId, 'resetGame');
     }
 
     if (result.method === 'clean') {
       const { clientId, gameId } = result;
-
-      games[gameId].players = games[gameId].players.map((player) => player.uuid === clientId ? { ...initialPlayer, place: player.place } : player);
-
-      updateGameState(gameId, 'update');
+      cleanGamePlace(game, gameId, clientId);
     }
 
     if (result.method === 'disconnect') {
       const { clientId, gameId } = result;
+      const isPlayerInGame = checkIfPlayerIsInGame(game, clientId);
 
-      if (clientId && (gameId || gameId === 0)) {
-        waitingPlayers.push({ clientId, gameId });
-        games[gameId].statuses.waitingForPlayers = true;
+      if (isPlayerInGame && clientId && (gameId || gameId === 0) && (game.statuses.gameStarted || game.statuses.auctionStarted)) {
+        waitingPlayers[gameId] = [...waitingPlayers[gameId], clientId];
 
-        const playersLeft = checkPlayersLeft(gameId);
-        if (playersLeft === 4) {
-          const game = setNewGame(gameId);
-          games[gameId] = { ...game };
-          updateGameState(gameId, 'reset');
-        } else {
+        if (!game.statuses.waitingForPlayers) {
+          game.statuses.waitingForPlayers = true;
           updateGameState(gameId, 'update');
+        }
+
+        const playersLeft = waitingPlayers[gameId].length;
+
+        if (playersLeft === 4) {
+          const newGame = setNewGame(gameId);
+          games[gameId] = { ...newGame };
+          updateGameState(gameId, 'reset');
         }
       }
     }
   })
 });
 
-const setScore = (game: any) => {
-  let scoreNs = 0;
-  let scoreEw = 0;
-
-  scoreNs += game.gamePoints.NS.above;
-  scoreNs += game.gamePoints.NS.under.reduce((val, sum) => val + sum);
-
-  scoreEw += game.gamePoints.EW.above;
-  scoreEw += game.gamePoints.EW.under.reduce((val, sum) => val + sum);
-
+const updateGamePoints = (game: Game, scoreNs: number, scoreEw: number) => {
   game.gamePoints.NS.score = scoreNs;
   game.gamePoints.EW.score = scoreEw;
 }
 
-const setEndGame = (game: any, gameId: number) => {
-  setScore(game);
-  game.statuses.endGame = true;
+export const setScore = (game: Game) => {
+  let scoreNs = 0;
+  let scoreEw = 0;
 
-  const payload = {
-    method: 'endGame',
-    gamePoints: game.gamePoints,
-    statuses: game.statuses,
-  };
+  const pointsNsAbove = game.gamePoints.NS.above;
+  const pointsNsUnder = game.gamePoints.NS.under
+  const pointsEwAbove = game.gamePoints.EW.above;
+  const pointsEwUnder = game.gamePoints.EW.under;
 
-  sendPayload(payload, gameId);
+  scoreNs += pointsNsAbove;
+  scoreNs += pointsNsUnder.reduce((val, sum) => val + sum);
+
+  scoreEw += pointsEwAbove;
+  scoreEw += pointsEwUnder.reduce((val, sum) => val + sum);
+
+  updateGamePoints(game, scoreNs, scoreEw)
+
+  return { scoreEw, scoreNs }
 };
 
-const resetGameState = (game: any) => {
+const setEndGame = (game: Game, gameId: number) => {
+  game.statuses.endGame = true;
+  setScore(game);
+  updateGameState(gameId, 'update');
+};
+
+const resetGameState = (game: Game) => {
   game.biddingHistory = [];
   game.throws = [];
   game.gamePoints.NS.round = 0;
@@ -368,64 +351,66 @@ const resetGameState = (game: any) => {
   game.selectedCards = [];
   game.statuses.gameStarted = false;
   game.statuses.auctionStarted = true;
-  game.bestBid = { ...initialBestBid };
+  game.statuses.isDummyVisible = false;
+  game.trump = { ...initialTrump };
 };
 
-const setNewDeal = (gameId: number) => {
-  const game = games[gameId];
+const setNewDeal = (game: Game, gameId: number) => {
   resetGameState(game);
-
   game.players = game.players.map((player) => ({ ...player, cards: setCards(game), cardsAmount: 13 }));
   updateGameState(gameId, 'update');
 };
 
-const setBestThrow = (game) => {
-  let best = { name: undefined, place: undefined, value: undefined, color: undefined };
+const checkIfBidGreaterThanTrump = (game: Game, card: Throw, best: Throw) => {
+  let bestThrow = { ...best };
+  const isCardValueGreater = card.color === best.color && cardWeights[card.value] > cardWeights[best.value];
+  const isColorGreater = card.color !== best.color && card.color === game.trump.colorName && best.color !== game.trump.colorName;
 
-  game.thrownCards.forEach((card: any) => {
-    if (!best.name) {
-      best = card;
-      return;
-    }
+  if (isCardValueGreater) {
+    bestThrow = card;
+  } else if (isColorGreater) {
+    bestThrow = card;
+  }
 
-    if (card.color === best.color && cardWeights[card.value] > cardWeights[best.value]) {
-      best = card;
-    } else if (card.color !== best.color && card.color === game.bestBid.colorName && best.color !== game.bestBid.colorName) {
-      best = card;
-    }
-  });
-
-  return best;
+  return bestThrow;
 };
 
-const setTurn = (place, gameId: number) => ({
-  place: place,
-  name: setTurnPlace(place, gameId),
-});
+const setBestThrow = (game: Game) => {
+  let bestThrow = { name: undefined, place: undefined, value: undefined, color: undefined };
+  game.thrownCards.forEach((card) => {
+    if (!bestThrow.name) {
+      bestThrow = card;
+      return;
+    }
+    bestThrow = checkIfBidGreaterThanTrump(game, card, bestThrow);
+  });
 
-const setBestBid = (bid, game) => {
-  let bestBid = { ...game.bestBid };
+  return bestThrow;
+};
+
+const setTrump = (bid: Bid, game: Game) => {
+  let trump: Trump = { ...game.trump };
 
   if (!bid.pass) {
-    bestBid = { ...bestBid, doubled: bid.doubled, redoubled: bid.redoubled };
+    trump = { ...trump, doubled: bid.doubled, redoubled: bid.redoubled };
 
-    if ((bid.colorName && bid.colorName !== bestBid.colorName) || (bid.value && bid.value !== bestBid.value)) {
-      let bestBidPlayer;
+    if ((bid.colorName && bid.colorName !== trump.colorName) || (bid.value && bid.value !== trump.value)) {
+      let trumpPlayer;
   
       game.biddingHistory.forEach((biddingBid) => {
-        if (!bestBidPlayer && dummyPlace[bid.place] === biddingBid.place && bid.colorName === biddingBid.colorName) {
-          bestBidPlayer = biddingBid.place;
+        if (!trumpPlayer && dummyPlace[bid.place] === biddingBid.place && bid.colorName === biddingBid.colorName) {
+          trumpPlayer = biddingBid.place;
         }
       });
   
-      bestBid = { ...bid, place: bestBidPlayer || bid.place };
+      trump = { ...bid, place: trumpPlayer || bid.place };
     }
   }
 
-  return bestBid;
+  return trump;
 };
 
-const setPassCount = (bid, count) => {
+const setPassCount = (bid: Bid, count: number) => {
   let passCount = count;
 
   if (bid.pass) {
@@ -437,24 +422,35 @@ const setPassCount = (bid, count) => {
   return passCount;
 };
 
-const filterCards = (cards, card) => {
-  let filteredCards = [...cards];
-  filteredCards = filteredCards.filter((c: any) => `${c.value}${c.color}` !== `${card.value}${card.color}`);
+const checkIsDummy = (dummyPlayer: Player, player: Player, trumpPlace: string) => {
+  let isDummy = false;
 
-  return filteredCards;
+  if (dummyPlayer && player.place === trumpPlace) {
+    isDummy = true;
+  }
+
+  return isDummy;
 };
 
-const checkIsDummy = (dummyPlayer, player, bestBidPlace) => dummyPlayer && player.place === bestBidPlace;
-const checkIsBestBid = (uuid, dummyPlayer, player) => dummyPlayer && dummyPlace[dummyPlayer.place] === player.place && uuid === dummyPlayer.uuid;
+const checkIsTrumpPlayer = (uuid: string, dummyPlayer: Player, player: Player) => {
+  let isTrumpPlayer = false;
 
-const preparePlayersToSend = (game: any, uuid?: string, dummyPlayer?: any) => {
+  if (dummyPlayer && dummyPlace[dummyPlayer.place] === player.place && uuid === dummyPlayer.uuid) {
+    isTrumpPlayer = true;
+  }
+
+  return isTrumpPlayer;
+}
+
+const preparePlayersToSend = (game: Game, uuid?: string, dummyPlayer?: Player) => {
   let preparedPlayers = [...game.players];
 
   preparedPlayers = preparedPlayers.map((player) => {
-    const isDummy = checkIsDummy(dummyPlayer, player, dummyPlace[game.bestBid.place]);
-    const isBestBid = checkIsBestBid(uuid, dummyPlayer, player);
+    const isDummy = checkIsDummy(dummyPlayer, player, dummyPlace[game.trump.place]);
+    const isTrump = checkIsTrumpPlayer(uuid, dummyPlayer, player);
+    const isDummyVisible = game.statuses.isDummyVisible;
 
-    if (uuid === player.uuid || (dummyPlayer && (isDummy || isBestBid))) {
+    if (uuid === player.uuid || (dummyPlayer && (isDummy || isTrump) && isDummyVisible)) {
       return player;
     }
 
@@ -464,29 +460,11 @@ const preparePlayersToSend = (game: any, uuid?: string, dummyPlayer?: any) => {
   return preparedPlayers;
 };
 
-const updateThrow = (payload, gameId: number) => {
-  const game = games[gameId];
-  const dummyPlayer = game.players.filter((player) => player.place === dummyPlace[game.bestBid.place]);
-
-  game.players.forEach(player => {
-    if (player.uuid) {
-      const preparedPlayers = preparePlayersToSend(game, player.uuid, dummyPlayer[0]);
-      clients[player.uuid].connection.send(JSON.stringify({ ...payload, players: preparedPlayers }));
-    }
-  });
-};
-
-const sendPayload = (payload, gameId: number) => {
-  games[gameId].players.forEach(player => {
-    if (player.uuid) {
-      clients[player.uuid].connection.send(JSON.stringify(payload));
-    }
-  })
-};
-
 const prepareGames = (uuid: string) => {
-  let preparedGames = games.map((game: any) => {
-    const players = preparePlayersToSend(game, uuid);
+  let preparedGames = games.map((game: Game) => {
+    const dummyPlayer = game.players.filter((player) => player.place === dummyPlace[game.trump.place]);
+    const players = preparePlayersToSend(game, uuid, dummyPlayer[0] || undefined);
+
     return { ...game, players };
   });
 
@@ -494,12 +472,8 @@ const prepareGames = (uuid: string) => {
 };
 
 const updateGameState = (gameId: number, method: string) => {
-  Object.keys(clients).forEach((client: any) => {
+  Object.keys(clients).forEach((client) => {
     const preparedGames = prepareGames(client);
     clients[client].connection.send(JSON.stringify({ method, gameId, games: preparedGames }));
   });
 };
-
-app.get('/', (req, res) => res.send('SIEMA'));
-
-server.listen(PORT, () => console.log(`No odpaliłem, port ${PORT}`));

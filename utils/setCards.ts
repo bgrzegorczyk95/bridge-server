@@ -1,3 +1,4 @@
+import { Card, Game } from '../@types/types';
 import { getRandomInt } from './randomInt'; 
 
 let selectedCards = [];
@@ -46,9 +47,9 @@ export const sortCards = (cards) => {
   return sortedCards;
 };
 
-export const setCards = (game: any) => {
-  const playerCards = [];
-  let cardsCount = 0;
+export const setCards = (game: Game) => {
+  const playerCards: Card[] = [];
+  let cardsCount: number = 0;
 
   while (cardsCount < 13) {
     const cardIndexNumber = getRandomInt(0, cards.length - 1);

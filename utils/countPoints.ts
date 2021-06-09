@@ -1,118 +1,114 @@
+import { Game } from "../@types/types";
 import { pointsValues } from "./dict";
+import { updateGamePoints } from "./initialValues";
 
-export const countPoints = (game: any) => {
-  const bestBidValue = parseInt(game.bestBid.value, 10);
-  const bestBidPair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'NS' : 'EW';
-  const oppositePair = (game.bestBid.place === 'N' || game.bestBid.place === 'S') ? 'EW' : 'NS';
-  const isAfterPart = game.gamePoints.afterPart.includes(bestBidPair);
-  const isOpositeAfterPart = game.gamePoints.afterPart.includes(oppositePair);
-  const gameNumber = game.gamePoints.games;
-  let pointsUnder = game.gamePoints[bestBidPair].under[gameNumber];
-  let pointsAbove = game.gamePoints[bestBidPair].above;
+export const countPoints = (game: Game) => {
+  const trumpValue: number = parseInt(game.trump.value, 10);
+  const trumpPair: string = (game.trump.place === 'N' || game.trump.place === 'S') ? 'NS' : 'EW';
+  const oppositePair: string = (game.trump.place === 'N' || game.trump.place === 'S') ? 'EW' : 'NS';
+  const isAfterPart: boolean = game.gamePoints.afterPart.includes(trumpPair);
+  const isOpositeAfterPart: boolean = game.gamePoints.afterPart.includes(oppositePair);
+  const gameNumber: number = game.gamePoints.games;
+  const isDoubled = game.trump.doubled;
+  const isRedoubled = game.trump.redoubled;
 
-  if (game.gamePoints[bestBidPair].round >= bestBidValue + 6) {
-    const surplus = game.gamePoints[bestBidPair].round - (bestBidValue + 6);
+  let pointsUnder: number = game.gamePoints[trumpPair].under[gameNumber] || 0;
+  let pointsAbove: number = game.gamePoints[trumpPair].above || 0;
 
-    if (!game.bestBid.doubled && !game.bestBid.redoubled && (!isAfterPart || isAfterPart)) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.normal[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.normal.NT) + 10;
-      }
-      pointsAbove += surplus * pointsValues.normal[game.bestBid.colorName];
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
-      }
+  const bestPairRounds = game.gamePoints[trumpPair].round;
+  const pairPoints: string = bestPairRounds >= trumpValue + 6 ? trumpPair : oppositePair;
+
+  if (bestPairRounds >= trumpValue + 6) {
+    const surplus = bestPairRounds - (trumpValue + 6);
+    const colorName = game.trump.colorName;
+    const isColorNT = colorName === 'NT';
+
+    if (!isDoubled && !isRedoubled && (!isAfterPart || isAfterPart)) {
+      pointsUnder += (trumpValue * pointsValues.normal[colorName]) + (isColorNT ? 10 : 0);
+      pointsAbove += surplus * pointsValues.normal[colorName];
+    } else if (isDoubled && !isRedoubled && !isAfterPart) {
+      pointsUnder += (trumpValue * pointsValues.doubled[colorName]) + (isColorNT ? 20 : 0);
       pointsAbove += surplus * 100;
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
-      }
+    } else if (!isDoubled && isRedoubled && !isAfterPart) {
+      pointsUnder += (trumpValue * pointsValues.redoubled[colorName]) + (isColorNT ? 40 : 0);
       pointsAbove += surplus * 200;
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.doubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.doubled.NT) + 20;
-      }
+    } else if (isDoubled && !isRedoubled && isAfterPart) {
+      pointsUnder += (trumpValue * pointsValues.doubled[colorName]) + (isColorNT ? 20 : 0);
       pointsAbove += surplus * 200;
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
-      if (game.bestBid.colorName !== 'NT') {
-        pointsUnder += bestBidValue * pointsValues.redoubled[game.bestBid.colorName];
-      } else {
-        pointsUnder += (bestBidValue * pointsValues.redoubled.NT) + 40;
-      }
+    } else if (!isDoubled && isRedoubled && isAfterPart) {
+      pointsUnder += (trumpValue * pointsValues.redoubled[colorName]) + (isColorNT ? 40 : 0);
       pointsAbove += surplus * 400;
     }
 
-    if (game.gamePoints[bestBidPair].round === 12 && !isAfterPart) {
+    if (bestPairRounds === 12 && !isAfterPart) {
       pointsAbove += 500;
-    } else if (game.gamePoints[bestBidPair].round === 12 && isAfterPart) {
+    } else if (bestPairRounds === 12 && isAfterPart) {
       pointsAbove += 750;
     }
 
-    if (game.gamePoints[bestBidPair].round === 13 && !isAfterPart) {
+    if (bestPairRounds === 13 && !isAfterPart) {
       pointsAbove += 1000;
-    } else if (game.gamePoints[bestBidPair].round === 13 && isAfterPart) {
+    } else if (bestPairRounds === 13 && isAfterPart) {
       pointsAbove += 1500;
     }
 
     if (pointsUnder >= 100) {
       if (!isAfterPart) {
-        game.gamePoints.afterPart.push(bestBidPair);
+        game.gamePoints.afterPart.push(trumpPair);
       }
 
-      game.gamePoints[bestBidPair].games += 1;
+      game.gamePoints[trumpPair].games += 1;
       game.gamePoints.games += 1;
       game.gamePoints.EW.under.push(0);
       game.gamePoints.NS.under.push(0);
 
-      if (game.gamePoints[bestBidPair].games === 2 && isOpositeAfterPart) {
+      const bestPairGames = game.gamePoints[trumpPair].games;
+
+      if (bestPairGames === 2 && isOpositeAfterPart) {
         pointsAbove += 500;
-      } else if (game.gamePoints[bestBidPair].games === 2 && !isOpositeAfterPart) {
+      } else if (bestPairGames === 2 && !isOpositeAfterPart) {
         pointsAbove += 700;
       }
     }
-
   } else {
-    const setbackCount = (bestBidValue + 6) - game.gamePoints[bestBidPair].round;
+    const oppositePairRounds = (trumpValue + 6) - bestPairRounds;
 
-    if (!game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
-      pointsAbove += setbackCount * 50;
-    } else if (!game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
-      pointsAbove += setbackCount * 100;
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && !isAfterPart) {
+    if (!isDoubled && !isRedoubled && !isAfterPart) {
+      pointsAbove += oppositePairRounds * 50;
+    } else if (!isDoubled && !isRedoubled && isAfterPart) {
+      pointsAbove += oppositePairRounds * 100;
+    } else if (isDoubled && !isRedoubled && !isAfterPart) {
       pointsAbove += 100;
-      if (setbackCount <= 3 && setbackCount > 1) {
+      if (oppositePairRounds <= 3 && oppositePairRounds > 1) {
         pointsAbove += 400;
-      } else if (setbackCount > 3) {
-        pointsAbove += ((setbackCount - 3) * 300) + 400;
+      } else if (oppositePairRounds > 3) {
+        pointsAbove += ((oppositePairRounds - 3) * 300) + 400;
       }
-    } else if (game.bestBid.doubled && !game.bestBid.redoubled && isAfterPart) {
+    } else if (isDoubled && !isRedoubled && isAfterPart) {
       pointsAbove += 200;
-      if (setbackCount > 1) {
-        pointsAbove += (setbackCount - 1) * 300;
+      if (oppositePairRounds > 1) {
+        pointsAbove += (oppositePairRounds - 1) * 300;
       }
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && !isAfterPart) {
+    } else if (!isDoubled && isRedoubled && !isAfterPart) {
       pointsAbove += 200;
-      if (setbackCount <= 3 && setbackCount > 1) {
+      if (oppositePairRounds <= 3 && oppositePairRounds > 1) {
         pointsAbove += 800;
-      } else if (setbackCount > 3) {
-        pointsAbove += ((setbackCount - 3) * 600) + 800;
+      } else if (oppositePairRounds > 3) {
+        pointsAbove += ((oppositePairRounds - 3) * 600) + 800;
       }
-    } else if (!game.bestBid.doubled && game.bestBid.redoubled && isAfterPart) {
+    } else if (!isDoubled && isRedoubled && isAfterPart) {
       pointsAbove += 400;
-      if (setbackCount > 1) {
-        pointsAbove += (setbackCount - 1) * 600;
+      if (oppositePairRounds > 1) {
+        pointsAbove += (oppositePairRounds - 1) * 600;
       }
     }
   }
 
-  game.gamePoints[bestBidPair].under[gameNumber] = pointsUnder;
-  game.gamePoints[bestBidPair].above = pointsAbove;
+  updateGamePoints(game, gameNumber, pointsUnder, pointsAbove, pairPoints);
+
+  return {
+    pairPoints,
+    pointsUnder,
+    pointsAbove,
+  }
 };
